@@ -125,7 +125,9 @@ class AnnealingAlgorithm(object):
     # REFERENCE: "Parallel implementations of the statistical cooling algorithm", Emile H.L. Aarts et.al.
     def __init__(self, start_state, route_map,
                  initial_sequence_length=1000,
+                 initial_sequence_num = 20,
                  accept_rate_initial=0.99,
+
 
 
                  epsilon=0.01,
@@ -142,6 +144,7 @@ class AnnealingAlgorithm(object):
         self.backup_state = None
         self.is_pal = is_parallel
         self.sub_chain_max_num = sub_chain_max_num
+        self.initial_sequence_num = initial_sequence_num
         self.sub_mkv_chain_length = sub_mkv_chain_length
         self.cost_accept_history = []
         self.cost_all_history = []
@@ -178,27 +181,39 @@ class AnnealingAlgorithm(object):
         T = c/(np.log(m2/(m2*self.accept_rate_initial-(1-self.accept_rate_initial)*m1)))
         return T
         '''
-        cost_decrease_list = []
-        cost_increase_list = []
-        s = copy.copy(self.s_state)
-        cost = s.cal_cost(self.route_map)
-        for i in xrange(self.initial_sequence_length):
-            s_new = s.change_state()
-            cost_new = s_new.cal_cost(self.route_map)
+        T_list = []
+        T_list_all = []
+        for i in xrange(self.initial_sequence_num):
+            cost_decrease_list = []
+            cost_increase_list = []
+            s = copy.copy(self.s_state)
+            cost = s.cal_cost(self.route_map)
+            for i in xrange(self.initial_sequence_length):
+                s_new = s.change_state()
+                cost_new = s_new.cal_cost(self.route_map)
+                if cost_new < cost:
+                    cost_decrease_list.append(cost_new - cost)
+                    s = s_new
+                else:
+                    cost_increase_list.append(cost_new - cost)
+            m1 = len(cost_decrease_list)
+            m2 = len(cost_increase_list)
+            c = np.mean(cost_increase_list)
+            T = c / (np.log(m2 / (m2 * self.accept_rate_initial - (1 - self.accept_rate_initial) * m1)))
+            if not isnan(T) and not isinf(T):
+                '''
+                isinf
+                isneginf
+                isposinf
+                isnan
+                isfinite
+                '''
+                T_list.append(T)
+            T_list_all.append(T)
 
-            if cost_new < cost:
-                cost_decrease_list.append(cost_new-cost)
-                s = s_new
-            else:
-                cost_increase_list.append(cost_new-cost)
-
-        m1 = len(cost_decrease_list)
-        m2 = len(cost_increase_list)
-        c = np.mean(cost_increase_list)
-        d = m2 / (m2 * self.accept_rate_initial - (1 - self.accept_rate_initial) * m1)
-        T = c / (np.log(m2 / (m2 * self.accept_rate_initial - (1 - self.accept_rate_initial) * m1)))
-
-        return T
+        print T_list
+        print T_list_all
+        return max(T_list)
 
     def algorithm_initialization(self):
         # 初始化温度
