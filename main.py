@@ -126,13 +126,13 @@ class AnnealingAlgorithm(object):
     def __init__(self, start_state, route_map,
                  initial_sequence_length=1000,
                  initial_sequence_num=20,
-                 accept_rate_initial=0.9,
+                 accept_rate_initial=0.95,
 
                  epsilon=0.01,
                  delta=0.01,
 
-                 sub_chain_max_num=1000,
-                 sub_mkv_chain_length=500,
+                 sub_chain_max_num=20000,
+                 sub_mkv_chain_length=200,
                  smooth_window_length=20,
 
                  is_parallel=False):
@@ -178,6 +178,7 @@ class AnnealingAlgorithm(object):
             T = c / (np.log(m2 / (m2 * self.accept_rate_initial - (1 - self.accept_rate_initial) * m1)))
             if np.isfinite(T):
                 T_list.append(T)
+        print T_list
 
         return max(T_list)
 
@@ -192,7 +193,7 @@ class AnnealingAlgorithm(object):
             pass
         else:
             # 串行退火
-            # T = self.algorithm_initialization()
+            T = self.algorithm_initialization()
             T = 100
             self.cost_accept_history.append(self.s_state.cal_cost(self.route_map))
             self.cost_all_history.append(self.s_state.cal_cost(self.route_map))
@@ -236,7 +237,7 @@ class AnnealingAlgorithm(object):
                 c_smooth = np.mean(temp_c)
 
                 self.T_prev = T
-                T = self.T_prev / (1 + math.log(1 + self.delta) * self.T_prev / 3 / sigma)
+                T = self.T_prev / (1 + math.log(1 + self.delta) * self.T_prev / 3 / sigma )
 
                 if self.c0_smooth is None:
                     self.c0_smooth = c_smooth
@@ -244,7 +245,7 @@ class AnnealingAlgorithm(object):
                 else:
                     delta = (c_smooth - self.c_smooth_prev) / (T - self.T_prev) * T / self.c0_smooth
                     self.c_smooth_prev = c_smooth
-                    if np.abs(delta) < self.epsilon:
+                    if np.abs(delta) < self.epsilon and sigma/c_smooth < 0.01:
                         print delta
                         print c_smooth
                         print sigma
@@ -261,7 +262,7 @@ class AnnealingAlgorithm(object):
 if __name__ == "__main__":
     # m1 = construct_map("map.csv", NUM_LOC)  # 最多25个地点
 
-    num_one_edge = 2
+    num_one_edge = 3
     num_loc = num_one_edge * 4
     m1 = construct_cuboid_map(10, 10, num_one_edge)
     #draw_map(m1)
