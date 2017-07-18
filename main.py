@@ -201,30 +201,32 @@ class AnnealingAlgorithm(object):
             for i in xrange(self.sub_chain_max_num):
                 sub_cost_accept_history = []
                 sub_cost_all_history = []
-                for j in xrange(self.sub_mkv_chain_length):
-                    state_new = self.s_state.change_state()
-                    cost_new = state_new.cal_cost(self.route_map)
-                    delta_cost = cost_new - self.cost_accept_history[-1]
 
-                    # 判断新的状态是否接受
-                    if delta_cost <= 0:
-                        self.accept = True
-                    else:
-                        if random.random() < math.exp(-delta_cost / T):
+                while len(sub_cost_accept_history) < self.smooth_window_length:
+                    sub_cost_accept_history.append(self.cost_accept_history[-1])
+                    sub_cost_all_history.append(self.cost_accept_history[-1])
+
+                    for j in xrange(self.sub_mkv_chain_length):
+                        state_new = self.s_state.change_state()
+                        cost_new = state_new.cal_cost(self.route_map)
+                        delta_cost = cost_new - self.cost_accept_history[-1]
+
+                        # 判断新的状态是否接受
+                        if delta_cost <= 0:
                             self.accept = True
                         else:
-                            self.accept = False
+                            if random.random() < math.exp(-delta_cost / T):
+                                self.accept = True
+                            else:
+                                self.accept = False
 
-                    # 根据接受结果做更新
-                    self.cost_all_history.append(cost_new)
-                    sub_cost_all_history.append(cost_new)
-                    if self.accept:
-                        self.cost_accept_history.append(cost_new)
-                        sub_cost_accept_history.append(cost_new)
-                        self.s_state = state_new
-
-                if not sub_cost_accept_history:
-                    continue
+                        # 根据接受结果做更新
+                        self.cost_all_history.append(cost_new)
+                        sub_cost_all_history.append(cost_new)
+                        if self.accept:
+                            self.cost_accept_history.append(cost_new)
+                            sub_cost_accept_history.append(cost_new)
+                            self.s_state = state_new
 
                 # 更新退火算法参数
                 if len(sub_cost_accept_history) < self.smooth_window_length:
@@ -246,12 +248,12 @@ class AnnealingAlgorithm(object):
                     delta = (c_smooth - self.c_smooth_prev) / (T - self.T_prev) * T / self.c0_smooth
                     self.c_smooth_prev = c_smooth
                     if np.abs(delta) < self.epsilon and sigma/c_smooth < 0.01:
-                        print delta
-                        print c_smooth
-                        print sigma
+                        print("delta is %.2f"%delta)
+                        print("c_smooth is %.2f"%c_smooth)
+                        print("sigma is %.2f"%sigma)
                         plot_list(sub_cost_accept_history)
-                        print sub_cost_accept_history
                         plot_list(sub_cost_all_history)
+                        print("T is %.2f"%T)
                         break
 
             print i
