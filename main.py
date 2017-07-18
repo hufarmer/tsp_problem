@@ -125,23 +125,20 @@ class AnnealingAlgorithm(object):
     # REFERENCE: "Parallel implementations of the statistical cooling algorithm", Emile H.L. Aarts et.al.
     def __init__(self, start_state, route_map,
                  initial_sequence_length=1000,
-                 initial_sequence_num = 20,
-                 accept_rate_initial=0.99,
-
-
+                 initial_sequence_num=20,
+                 accept_rate_initial=0.9,
 
                  epsilon=0.01,
                  delta=0.01,
 
                  sub_chain_max_num=1000,
-                 sub_mkv_chain_length=200,
-                 smooth_window_length=30,
+                 sub_mkv_chain_length=500,
+                 smooth_window_length=20,
 
                  is_parallel=False):
 
         self.s_state = start_state
         self.route_map = route_map
-        self.backup_state = None
         self.is_pal = is_parallel
         self.sub_chain_max_num = sub_chain_max_num
         self.initial_sequence_num = initial_sequence_num
@@ -161,32 +158,11 @@ class AnnealingAlgorithm(object):
         self.initial_sequence_length = initial_sequence_length
 
     def temperature_initialization(self):
-        '''
-        cost_list = []
-        s = copy.deepcopy(self.s_state)
-        for i in xrange(self.initial_sequence_length):
-            cost_list.append(s.cal_cost())
-            s.change_state()
-
-        cost_decrease_list = []
-        cost_increase_list = []
-        for i in len(cost_list)-1:
-            if cost_list[i+1] < cost_list[i]:
-                cost_decrease_list.append(cost_list[i+1])
-            else:
-                cost_increase_list.append(cost_list[i+1])
-        m1 = len(cost_decrease_list)
-        m2 = len(cost_increase_list)
-        c = np.mean(cost_increase_list)
-        T = c/(np.log(m2/(m2*self.accept_rate_initial-(1-self.accept_rate_initial)*m1)))
-        return T
-        '''
         T_list = []
-        T_list_all = []
         for i in xrange(self.initial_sequence_num):
             cost_decrease_list = []
             cost_increase_list = []
-            s = copy.copy(self.s_state)
+            s = copy.deepcopy(self.s_state)
             cost = s.cal_cost(self.route_map)
             for i in xrange(self.initial_sequence_length):
                 s_new = s.change_state()
@@ -200,19 +176,9 @@ class AnnealingAlgorithm(object):
             m2 = len(cost_increase_list)
             c = np.mean(cost_increase_list)
             T = c / (np.log(m2 / (m2 * self.accept_rate_initial - (1 - self.accept_rate_initial) * m1)))
-            if not isnan(T) and not isinf(T):
-                '''
-                isinf
-                isneginf
-                isposinf
-                isnan
-                isfinite
-                '''
+            if np.isfinite(T):
                 T_list.append(T)
-            T_list_all.append(T)
 
-        print T_list
-        print T_list_all
         return max(T_list)
 
     def algorithm_initialization(self):
@@ -226,18 +192,21 @@ class AnnealingAlgorithm(object):
             pass
         else:
             # 串行退火
-            T = self.algorithm_initialization()
+            # T = self.algorithm_initialization()
+            T = 100
+            self.cost_accept_history.append(self.s_state.cal_cost(self.route_map))
+            self.cost_all_history.append(self.s_state.cal_cost(self.route_map))
 
             for i in xrange(self.sub_chain_max_num):
+                sub_cost_accept_history = []
+                sub_cost_all_history = []
                 for j in xrange(self.sub_mkv_chain_length):
-                    self.backup_state = copy.deepcopy(self.s_state)
-                    self.s_state.change_state()
-
-                    cost_temp = self.s_state.cal_cost()
-                    delta_cost = cost_temp - self.cost_accept_history[-1]
+                    state_new = self.s_state.change_state()
+                    cost_new = state_new.cal_cost(self.route_map)
+                    delta_cost = cost_new - self.cost_accept_history[-1]
 
                     # 判断新的状态是否接受
-                    if delta_cost < 0:
+                    if delta_cost <= 0:
                         self.accept = True
                     else:
                         if random.random() < math.exp(-delta_cost / T):
@@ -246,14 +215,23 @@ class AnnealingAlgorithm(object):
                             self.accept = False
 
                     # 根据接受结果做更新
-                    self.cost_all_history.append(cost_temp)
+                    self.cost_all_history.append(cost_new)
+                    sub_cost_all_history.append(cost_new)
                     if self.accept:
-                        self.cost_accept_history.append(cost_temp)
-                    else:
-                        self.s_state = self.backup_state
+                        self.cost_accept_history.append(cost_new)
+                        sub_cost_accept_history.append(cost_new)
+                        self.s_state = state_new
+
+                if not sub_cost_accept_history:
+                    continue
 
                 # 更新退火算法参数
-                temp_c = self.cost_all_history[-self.smooth_window_length]
+                if len(sub_cost_accept_history) < self.smooth_window_length:
+                    temp_c = sub_cost_accept_history
+                    print "not enough length in sub_cost_accpet_history"
+                    print len(sub_cost_accept_history)
+                else:
+                    temp_c = sub_cost_accept_history[-self.smooth_window_length:]
                 sigma = np.std(temp_c)
                 c_smooth = np.mean(temp_c)
 
@@ -261,17 +239,29 @@ class AnnealingAlgorithm(object):
                 T = self.T_prev / (1 + math.log(1 + self.delta) * self.T_prev / 3 / sigma)
 
                 if self.c0_smooth is None:
-                    c0_smooth = c_smooth
+                    self.c0_smooth = c_smooth
+                    self.c_smooth_prev = c_smooth
                 else:
-                    delta = (c_smooth - self.c_smooth_prev) / (T - self.T_prev) * T / c0_smooth
-                    if delta < self.eplison:
+                    delta = (c_smooth - self.c_smooth_prev) / (T - self.T_prev) * T / self.c0_smooth
+                    self.c_smooth_prev = c_smooth
+                    if np.abs(delta) < self.epsilon:
+                        print delta
+                        print c_smooth
+                        print sigma
+                        plot_list(sub_cost_accept_history)
+                        print sub_cost_accept_history
+                        plot_list(sub_cost_all_history)
                         break
+
+            print i
+            plot_list(self.cost_accept_history)
+            return self.cost_accept_history[-1]
 
 
 if __name__ == "__main__":
     # m1 = construct_map("map.csv", NUM_LOC)  # 最多25个地点
 
-    num_one_edge = 4
+    num_one_edge = 2
     num_loc = num_one_edge * 4
     m1 = construct_cuboid_map(10, 10, num_one_edge)
     #draw_map(m1)
@@ -280,7 +270,8 @@ if __name__ == "__main__":
     if self_adaption:
         state_initial = AnnealingState(get_one_route(m1, num_loc))
         aa = AnnealingAlgorithm(state_initial, m1)
-        aa.run()
+        cost = aa.run()
+        print cost
     else:
         #   模拟退火
         T = 1000
