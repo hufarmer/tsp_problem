@@ -111,6 +111,7 @@ class AnnealingState(object):
 
     def __init__(self, route):
         self.route = route
+        self.T = None
 
     def change_state(self):
         # 在原有路径上继续产生新的路径
@@ -121,180 +122,283 @@ class AnnealingState(object):
         return cost
 
 
+class AnnealingStatePool(object):
+
+    def __init__(self, pool_size):
+        global route_map, num_loc
+        self.pool_size = pool_size
+        self.pool = []
+        self.pool_value = []
+        self.max_value_index = -1
+        self.min_value_index = -1
+        self.__route_map = route_map
+        self.__num_loc = num_loc
+
+    def initialization(self):
+        for i in xrange(self.pool_size):
+            self.pool.append(AnnealingState(get_one_route(self.__route_map, self.__num_loc)))
+            self.pool_value.append(self.pool[-1].cal_cost(self.__route_map))
+
+        self.max_value_index = self.pool_value.index(max(self.pool_value))
+        self.min_value_index = self.pool_value.index(min(self.pool_value))
+
+    def random_choose(self):
+        return random.randint(0, self.pool_size-1)
+
+    def compare_and_replace(self, state):
+        cost_temp = state.cal_cost(self.__route_map)
+        max_cost_in_pool = self.pool_value[self.max_value_index]
+        min_cost_in_pool = self.pool_value[self.min_value_index]
+
+        if cost_temp >= max_cost_in_pool: # worse than all states
+            return -1
+        elif cost_temp <= min_cost_in_pool:  # no worse than all states
+            self.pool[self.max_value_index] = state
+            self.pool_value[self.max_value_index] = cost_temp
+            self.min_value_index = self.max_value_index
+            self.max_value_index = self.pool_value.index(max(self.pool_value))
+            return 1
+        else:
+            self.pool[self.max_value_index] = state
+            self.pool_value[self.max_value_index] = cost_temp
+            self.max_value_index = self.pool_value.index(max(self.pool_value))
+            return 0
+
+    def compare_and_replace1(self, state, original_index):
+        cost_temp = state.cal_cost(self.__route_map)
+        max_cost_in_pool = self.pool_value[self.max_value_index]
+        min_cost_in_pool = self.pool_value[self.min_value_index]
+
+        if cost_temp >= max_cost_in_pool:  # worse than all states
+            self.pool[original_index] = state
+            self.pool_value[original_index] = cost_temp
+            self.max_value_index = original_index
+            return -1
+        elif cost_temp <= min_cost_in_pool:  # no worse than all states
+            self.pool[self.max_value_index] = state
+            self.pool_value[self.max_value_index] = cost_temp
+            self.min_value_index = self.max_value_index
+            self.max_value_index = self.pool_value.index(max(self.pool_value))
+            return 1
+        else:
+            self.pool[self.max_value_index] = state
+            self.pool_value[self.max_value_index] = cost_temp
+            self.max_value_index = self.pool_value.index(max(self.pool_value))
+            return 0
+
+
 class AnnealingAlgorithm(object):
     # REFERENCE: "Parallel implementations of the statistical cooling algorithm", Emile H.L. Aarts et.al.
-    def __init__(self, start_state, route_map,
-                 initial_sequence_length=1000,
-                 initial_sequence_num=200,
-                 accept_rate_initial=0.98,
+    def __init__(self, state=None,
+                 initial_sequence_length=1000, initial_sequence_num=200, accept_rate_initial=0.98,
+                 epsilon=0.01, delta=0.01,
+                 sub_chain_max_num=20000, sub_mkv_chain_length=2000, smooth_window_length=20):
+        self.s_state = state
+        self.state_pool = None
 
-                 epsilon=0.01,
-                 delta=0.01,
-
-                 sub_chain_max_num=20000,
-                 sub_mkv_chain_length=2000,
-                 smooth_window_length=20,
-
-                 is_parallel=False):
-
-        self.s_state = start_state
-        self.route_map = route_map
-        self.is_pal = is_parallel
-        self.sub_chain_max_num = sub_chain_max_num
+        self.initial_sequence_length = initial_sequence_length
         self.initial_sequence_num = initial_sequence_num
-        self.sub_mkv_chain_length = sub_mkv_chain_length
-        self.cost_accept_history = []
-        self.cost_all_history = []
-        self.accept = None
-        self.smooth_window_length = smooth_window_length
+        self.accept_rate_initial = accept_rate_initial
 
         self.epsilon = epsilon
         self.delta = delta
-        self.accept_rate_initial = accept_rate_initial
 
+        self.sub_chain_max_num = sub_chain_max_num
+        self.sub_mkv_chain_length = sub_mkv_chain_length
+        self.smooth_window_length = smooth_window_length
+
+        self.cost_accept_history = []
+        self.cost_all_history = []
         self.c_smooth_prev = None
-        self.c0_smooth = None
         self.T_prev = None
-        self.initial_sequence_length = initial_sequence_length
+        self.T = None
 
-    def temperature_initialization(self):
-        T_list = []
-        while not T_list:
-            for i in xrange(self.initial_sequence_num):
-                cost_decrease_list = []
-                cost_increase_list = []
-                s = copy.deepcopy(self.s_state)
-                cost = s.cal_cost(self.route_map)
-                for i in xrange(self.initial_sequence_length):
-                    s_new = s.change_state()
-                    cost_new = s_new.cal_cost(self.route_map)
-                    if cost_new < cost:
-                        cost_decrease_list.append(cost_new - cost)
-                        s = s_new
+    def set_temperature(self, T=None):
+        global route_map
+        if T is None:
+            T_list = []
+            while not T_list:
+                for i in xrange(self.initial_sequence_num):
+                    cost_decrease_list = []
+                    cost_increase_list = []
+                    s = self.s_state
+                    cost = s.cal_cost(route_map)
+                    for i in xrange(self.initial_sequence_length):
+                        s_new = s.change_state()
+                        cost_new = s_new.cal_cost(route_map)
+                        if cost_new < cost:
+                            cost_decrease_list.append(cost_new - cost)
+                            s = s_new
+                        else:
+                            cost_increase_list.append(cost_new - cost)
+                    m1 = len(cost_decrease_list)
+                    m2 = len(cost_increase_list)
+                    c = np.mean(cost_increase_list)
+                    temp = m2 / (m2 * self.accept_rate_initial - (1 - self.accept_rate_initial) * m1)
+                    if temp > 0:
+                        T = c / np.log(temp)
+                        T_list.append(T)
+            self.T = max(T_list)
+        else:
+            self.T = T
+
+    def set_state(self, state):
+        self.s_state = state
+
+    def set_state_pool(self, state_pool):
+        self.state_pool = state_pool
+
+    # 需要起始温度和起始状态
+    def run_one_episode(self, state, T, sub_mkv_chain_length, smooth_window_length):
+        global route_map, num_loc
+        cur_state = state
+        cur_cost = state.cal_cost(route_map)
+        sub_cost_accept_history = [cur_cost, ]
+        sub_cost_all_history = [cur_cost, ]
+
+        while len(sub_cost_accept_history) < smooth_window_length:
+            sub_cost_accept_history.append(sub_cost_accept_history[-1])
+            sub_cost_all_history.append(sub_cost_accept_history[-1])
+            for j in xrange(sub_mkv_chain_length):
+                state_new = cur_state.change_state()
+                cost_new = state_new.cal_cost(route_map)
+                delta_cost = cost_new - cur_cost
+                # 判断新的状态是否接受
+                if delta_cost <= 0:
+                    accept = True
+                else:
+                    if random.random() < math.exp(-delta_cost / T):
+                        accept = True
                     else:
-                        cost_increase_list.append(cost_new - cost)
-                m1 = len(cost_decrease_list)
-                m2 = len(cost_increase_list)
-                c = np.mean(cost_increase_list)
-                temp = m2 / (m2 * self.accept_rate_initial - (1 - self.accept_rate_initial) * m1)
-                if temp > 0:
-                    T = c / np.log(temp)
-                    T_list.append(T)
+                        accept = False
+                # 根据接受结果做更新
+                sub_cost_all_history.append(cost_new)
+                if accept:
+                    sub_cost_accept_history.append(cost_new)
+                    cur_state = state_new
+                    cur_cost = cost_new
 
-        print T_list
-        return max(T_list)
+        cost_history_windowed = sub_cost_accept_history[-smooth_window_length:]
+        return cur_state, cost_history_windowed, sub_cost_accept_history, sub_cost_all_history
 
-    def algorithm_initialization(self):
-        # 初始化温度
-        t = self.temperature_initialization()
-        return t
+    def update_config(self, cost_history_windowed, T, T_prev, c_smooth_prev, delta, epsilon):
+        # 更新退火算法参数: 包括温度，状态
+        sigma = np.std(cost_history_windowed)
+        c_smooth = np.mean(cost_history_windowed)
+        T_new = T / (1 + math.log(1 + delta) * T / 3 / (sigma + 0.01))
+
+        if c_smooth_prev is None:
+            c_smooth_prev = c_smooth
+            finish_flag = False
+        else:
+            delta_stop = (c_smooth - c_smooth_prev) / c_smooth
+            c_smooth_prev = c_smooth
+            if np.abs(delta_stop) < epsilon and sigma / c_smooth < 0.01:
+                print("delta is %.2f" % delta_stop)
+                print("c_smooth is %.2f" % c_smooth)
+                print("sigma is %.2f" % sigma)
+                print("T is %.2f" % T)
+                finish_flag = True
+            else:
+                finish_flag = False
+
+        return T_new, finish_flag, c_smooth_prev
 
     def run(self):
+        # 自适应串行退火
+        assert self.s_state is not None
+        global route_map
+        self.set_temperature()
+        self.cost_accept_history.append(self.s_state.cal_cost(route_map))
+        self.cost_all_history.append(self.s_state.cal_cost(route_map))
 
-        if self.is_pal:
-            pass
-        else:
-            # 串行退火
-            T = self.algorithm_initialization()
-            #T = 100
-            self.cost_accept_history.append(self.s_state.cal_cost(self.route_map))
-            self.cost_all_history.append(self.s_state.cal_cost(self.route_map))
+        for i in xrange(self.sub_chain_max_num):
 
-            for i in xrange(self.sub_chain_max_num):
-                sub_cost_accept_history = []
-                sub_cost_all_history = []
+            state_new, cost_history_windowed, sub_cost_accept_history, sub_cost_all_history = \
+                self.run_one_episode(self.s_state, self.T, self.sub_mkv_chain_length, self.smooth_window_length)
 
-                while len(sub_cost_accept_history) < self.smooth_window_length:
-                    sub_cost_accept_history.append(self.cost_accept_history[-1])
-                    sub_cost_all_history.append(self.cost_accept_history[-1])
+            T_new, finish_flag, c_smooth_prev = \
+                self.update_config(cost_history_windowed, self.T, self.T_prev, self.c_smooth_prev, self.delta,
+                                      self.epsilon)
 
-                    for j in xrange(self.sub_mkv_chain_length):
-                        state_new = self.s_state.change_state()
-                        cost_new = state_new.cal_cost(self.route_map)
-                        delta_cost = cost_new - self.cost_accept_history[-1]
+            if finish_flag:
+                break
+            print T_new
+            self.T_prev = self.T
+            self.T = T_new
+            self.c_smooth_prev = c_smooth_prev
+            self.s_state = state_new
+            self.cost_accept_history.extend(sub_cost_accept_history)
+            self.cost_all_history.extend(sub_cost_all_history)
 
-                        # 判断新的状态是否接受
-                        if delta_cost <= 0:
-                            self.accept = True
-                        else:
-                            if random.random() < math.exp(-delta_cost / T):
-                                self.accept = True
-                            else:
-                                self.accept = False
+        print i
+        plot_list(self.cost_accept_history)
+        return self.cost_accept_history[-1]
 
-                        # 根据接受结果做更新
-                        self.cost_all_history.append(cost_new)
-                        sub_cost_all_history.append(cost_new)
-                        if self.accept:
-                            self.cost_accept_history.append(cost_new)
-                            sub_cost_accept_history.append(cost_new)
-                            self.s_state = state_new
+    def run_parallel(self):
+        # 并行退火
+        self.state_pool.initialization()
+        for i in xrange(1000):
 
-                # 更新退火算法参数
-                temp_c = sub_cost_accept_history[-self.smooth_window_length:]
-                sigma = np.std(temp_c)
-                c_smooth = np.mean(temp_c)
+            index = self.state_pool.random_choose()
+            state = self.state_pool.pool[index]   #!!!!!!deepcopy???
+            # print self.state_pool.pool_value[0]
+            print self.state_pool.pool[0].T
 
-                self.T_prev = T
-                T = self.T_prev / (1 + math.log(1 + self.delta) * self.T_prev / 3 / (sigma+0.01))
+            self.set_state(state)
+            if state.T == None:
+                self.set_temperature()
+            else:
+                self.T = state.T
 
-                if self.c0_smooth is None:
-                    self.c0_smooth = c_smooth
-                    self.c_smooth_prev = c_smooth
-                else:
-                    delta = (c_smooth - self.c_smooth_prev) / (T - self.T_prev) * T / self.c0_smooth
-                    self.c_smooth_prev = c_smooth
-                    if np.abs(delta) < self.epsilon and sigma/c_smooth < 0.01:
-                        print("delta is %.2f"%delta)
-                        print("c_smooth is %.2f"%c_smooth)
-                        print("sigma is %.2f"%sigma)
-                        plot_list(sub_cost_accept_history)
-                        plot_list(sub_cost_all_history)
-                        print("T is %.2f"%T)
-                        break
+            state_new, cost_history_windowed, sub_cost_accept_history, sub_cost_all_history = \
+                self.run_one_episode(self.s_state, self.T, self.sub_mkv_chain_length, self.smooth_window_length)
 
-            print i
-            plot_list(self.cost_accept_history)
-            return self.cost_accept_history[-1]
+            T_new, finish_flag, c_smooth_prev = \
+                self.update_config(cost_history_windowed, self.T, self.T_prev, self.c_smooth_prev, self.delta, self.epsilon)
 
+            if finish_flag:
+                break
+
+            self.T_prev = self.T
+            self.T = T_new
+            self.c_smooth_prev = c_smooth_prev
+            state_new.T = T_new
+            self.s_state = state_new
+            self.cost_accept_history.extend(sub_cost_accept_history)
+            self.cost_all_history.extend(sub_cost_all_history)
+
+            flag = self.state_pool.compare_and_replace1(self.s_state, index)
+
+
+        print i
+       # plot_list(self.cost_accept_history)
+        return self.cost_accept_history[-1]
 
 if __name__ == "__main__":
-    # m1 = construct_map("map.csv", NUM_LOC)  # 最多25个地点
-
-    num_one_edge = 4
+    # m1 = construct_map("map.csv", NUM_LOC)  #
+    global route_map, num_loc
+    num_one_edge = 2
     num_loc = num_one_edge * 4
-    m1 = construct_cuboid_map(10, 10, num_one_edge)
-    #draw_map(m1)
-    self_adaption = True
+    route_map = construct_cuboid_map(10, 10, num_one_edge)
+
+    # draw_map(m1)
+    self_adaption = not True
+    is_parallel = not False
 
     if self_adaption:
-        state_initial = AnnealingState(get_one_route(m1, num_loc))
-        aa = AnnealingAlgorithm(state_initial, m1)
+        state_initial = AnnealingState(get_one_route(route_map, num_loc))
+        aa = AnnealingAlgorithm(state_initial)
         cost = aa.run()
         print cost
-    else:
-        #   模拟退火
-        T = 1000
-        r = 0.7
-        cost_history = []
-        route_cur = get_one_route(m1)
-        cost_cur = cal_route_cost(m1, route_cur)
-        cost_history.append(cost_cur)
-        for i in xrange(100000):
-            # 剪支
-            route_temp = change_route(route_cur)
-            cost_cur = cal_route_cost(m1, route_cur)
-            delta_cost = cost_cur - cost_history[-1]
-            if delta_cost < 0:
-                cost_history.append(cost_cur)
-                route_cur = route_temp
-            elif random.random() < math.exp(-delta_cost / T):
-                cost_history.append(cost_cur)
-                route_cur = route_temp
-                T *= r
-        plot_list(cost_history)
+    elif is_parallel:
+        state_pool = AnnealingStatePool(2)
+        aa = AnnealingAlgorithm()
+        aa.set_state_pool(state_pool)
+        cost = aa.run_parallel()
+        print cost
 
-    print "FINISHED"
+print "FINISHED"
 
 
 
