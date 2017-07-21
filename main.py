@@ -6,6 +6,7 @@ import random
 import numpy as np
 import copy
 import matplotlib.pyplot as plt
+import dispy
 
 NUM_LOC = 7  # 取值[0-25]
 
@@ -375,6 +376,69 @@ class AnnealingAlgorithm(object):
        # plot_list(self.cost_accept_history)
         return self.cost_accept_history[-1]
 
+
+    def dispy_run_one_episode(self, state, T):
+        global sub_mkv_chain_length, smooth_window_length, delta, epsilon
+        global route_map, num_loc
+        cur_state = state
+        cur_cost = state.cal_cost(route_map)
+        sub_cost_accept_history = [cur_cost, ]
+        sub_cost_all_history = [cur_cost, ]
+
+        while len(sub_cost_accept_history) < smooth_window_length:
+            sub_cost_accept_history.append(sub_cost_accept_history[-1])
+            sub_cost_all_history.append(sub_cost_accept_history[-1])
+            for j in xrange(sub_mkv_chain_length):
+                state_new = cur_state.change_state()
+                cost_new = state_new.cal_cost(route_map)
+                delta_cost = cost_new - cur_cost
+                # 判断新的状态是否接受
+                if delta_cost <= 0:
+                    accept = True
+                else:
+                    if random.random() < math.exp(-delta_cost / T):
+                        accept = True
+                    else:
+                        accept = False
+                # 根据接受结果做更新
+                sub_cost_all_history.append(cost_new)
+                if accept:
+                    sub_cost_accept_history.append(cost_new)
+                    cur_state = state_new
+                    cur_cost = cost_new
+
+        cost_history_windowed = sub_cost_accept_history[-smooth_window_length:]
+        return cur_state, cost_history_windowed, sub_cost_accept_history, sub_cost_all_history
+
+
+
+    def dispy_update_config(self, cost_history_windowed):
+
+
+    def dispy_setup(self):
+        global sub_mkv_chain_length, smooth_window_length, delta, epsilon
+        global route_map, num_loc
+        sub_mkv_chain_length = 1000
+        smooth_window_length = 20
+        delta = 0.01
+        epsilon = 0.01
+
+
+    def dispy_cleanup(self):
+        global sub_mkv_chain_length, smooth_window_length, delta, epsilon
+        global route_map, num_loc
+        del sub_mkv_chain_length, smooth_window_length, delta, epsilon
+        del route_map, num_loc
+
+
+    def dispy_callback(self):
+
+
+
+
+
+
+
 if __name__ == "__main__":
     # m1 = construct_map("map.csv", NUM_LOC)  #
     global route_map, num_loc
@@ -383,8 +447,9 @@ if __name__ == "__main__":
     route_map = construct_cuboid_map(10, 10, num_one_edge)
 
     # draw_map(m1)
-    self_adaption = not True
-    is_parallel = not False
+    self_adaption = False
+    is_parallel =  False
+    is_parallel_dispy = True
 
     if self_adaption:
         state_initial = AnnealingState(get_one_route(route_map, num_loc))
@@ -397,6 +462,27 @@ if __name__ == "__main__":
         aa.set_state_pool(state_pool)
         cost = aa.run_parallel()
         print cost
+    elif is_parallel_dispy:
+
+        state_pool = AnnealingStatePool(2)
+        state_pool.initialization()
+
+        cluster = dispy.qq(dispy_run_one_episode,
+                                   setup=dispy_setup,
+                                   depends=[route_map, num_loc]
+                                   cleanup=dispy_cleanup,
+                                   cluster_status=dispy_callback)
+
+        for i in xrange(state_pool.pool_size):
+            job = cluster.submit(state_initial)
+            job.id = i
+            job.append(job)
+
+        for job in jobs:
+            answer = job()
+            print('%s executed job %s at %s with %s' % (host, job.id, job.start_time, n))
+
+        cluster.print_status()
 
 print "FINISHED"
 
