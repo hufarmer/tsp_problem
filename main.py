@@ -7,6 +7,8 @@ import numpy as np
 import copy
 import matplotlib.pyplot as plt
 import dispy
+import functools
+import threading
 
 NUM_LOC = 7  # 取值[0-25]
 
@@ -55,7 +57,7 @@ def dis_two_loc(m, loc1, loc2):
 def cal_route_cost(m, route):
     cost = 0
     length = len(route)
-    for i in range(length-1):
+    for i in xrange(length-1):
         cost += dis_two_loc(m, route[i], route[i+1])
 
     cost += dis_two_loc(m, route[length-1], route[0])
@@ -90,10 +92,11 @@ def route_swap2(r, a1, b1):
 
 def change_route(route):
     # 返回新路径，不改变原路径
-    a = random.randint(0, NUM_LOC-1)
+    n_l = len(route)
+    a = random.randint(0, n_l-1)
     b = a
     while a == b:
-        b = random.randint(0, NUM_LOC-1)
+        b = random.randint(0, n_l-1)
 
     # 随机选择2个节点，交换路径中的这2个节点的顺序。
     # return route_swap1(route, a, b)
@@ -107,12 +110,15 @@ def plot_list(l):
     plt.plot(l)
     plt.show()
 
-
+# 封装所有操作，dispy调用
 class AnnealingState(object):
 
     def __init__(self, route):
         self.route = route
         self.T = None
+        self.c_smooth_prev = None
+        self.prev_state_route = None
+        self.pos_in_pool = None
 
     def change_state(self):
         # 在原有路径上继续产生新的路径
@@ -186,6 +192,26 @@ class AnnealingStatePool(object):
             self.pool_value[self.max_value_index] = cost_temp
             self.max_value_index = self.pool_value.index(max(self.pool_value))
             return 0
+
+    def compare_and_replace_par(self, state):
+        cost_temp = state.cal_cost(self.__route_map)
+        max_cost_in_pool = self.pool_value[self.max_value_index]
+        min_cost_in_pool = self.pool_value[self.min_value_index]
+
+        if cost_temp >= max_cost_in_pool:  # worse than all states
+            return -1
+        elif cost_temp <= min_cost_in_pool:  # no worse than all states
+            self.pool[self.max_value_index] = state
+            self.pool_value[self.max_value_index] = cost_temp
+            self.min_value_index = self.max_value_index
+            self.max_value_index = self.pool_value.index(max(self.pool_value))
+            return 1
+        else:
+            self.pool[self.max_value_index] = state
+            self.pool_value[self.max_value_index] = cost_temp
+            self.max_value_index = self.pool_value.index(max(self.pool_value))
+            return 0
+
 
 
 class AnnealingAlgorithm(object):
@@ -377,70 +403,268 @@ class AnnealingAlgorithm(object):
         return self.cost_accept_history[-1]
 
 
-    def dispy_run_one_episode(self, state, T):
-        global sub_mkv_chain_length, smooth_window_length, delta, epsilon
-        global route_map, num_loc
-        cur_state = state
-        cur_cost = state.cal_cost(route_map)
-        sub_cost_accept_history = [cur_cost, ]
-        sub_cost_all_history = [cur_cost, ]
 
-        while len(sub_cost_accept_history) < smooth_window_length:
-            sub_cost_accept_history.append(sub_cost_accept_history[-1])
-            sub_cost_all_history.append(sub_cost_accept_history[-1])
-            for j in xrange(sub_mkv_chain_length):
-                state_new = cur_state.change_state()
-                cost_new = state_new.cal_cost(route_map)
-                delta_cost = cost_new - cur_cost
-                # 判断新的状态是否接受
-                if delta_cost <= 0:
+def dispy_one_episode(state):
+    print "func in"
+    import random, math, time, copy
+    import numpy as np
+    global initial_sequence_length, initial_sequence_num, accept_rate_initial
+    global sub_mkv_chain_length, smooth_window_length, delta, epsilon
+    global num_loc, route_map
+
+    #===================================================================================
+    # 读取状态
+    prev_state_route = state.prev_state_route
+    pos_in_pool = state.pos_in_pool
+    c_smooth_prev = state.c_smooth_prev
+    #===================================================================================
+    is_manual = False
+    # 读取温度
+    if state.T is None:
+        if is_manual:
+            T = 100
+        else:
+            T_list = []
+            while not T_list:
+                for i in xrange(initial_sequence_num):
+                    cost_decrease_list = []
+                    cost_increase_list = []
+                    s = state
+                    cost = state.cal_cost(route_map)
+                    for i in xrange(initial_sequence_length):
+                        s_new = s.change_state()
+                        cost_new = s_new.cal_cost(route_map)
+                        if cost_new < cost:
+                            cost_decrease_list.append(cost_new - cost)
+                            s = s_new
+                        else:
+                            cost_increase_list.append(cost_new - cost)
+                    m1 = len(cost_decrease_list)
+                    m2 = len(cost_increase_list)
+                    c = np.mean(cost_increase_list)
+                    temp = m2 / (m2 * accept_rate_initial - (1 - accept_rate_initial) * m1)
+                    if temp > 0:
+                        T = c / np.log(temp)
+                        T_list.append(T)
+            T = max(T_list)
+    else:
+        T = state.T
+
+
+    #===================================================================================
+    # 计算一段马氏链
+    cur_state = state
+    cur_cost = state.cal_cost(route_map)
+    sub_cost_accept_history = [cur_cost, ]
+    sub_cost_all_history = [cur_cost, ]
+
+    while len(sub_cost_accept_history) < smooth_window_length:
+        sub_cost_accept_history.append(sub_cost_accept_history[-1])
+        sub_cost_all_history.append(sub_cost_accept_history[-1])
+        for j in xrange(sub_mkv_chain_length):
+            state_new = cur_state.change_state()
+            cost_new = state_new.cal_cost(route_map)
+            delta_cost = cost_new - cur_cost
+            # 判断新的状态是否接受
+            if delta_cost <= 0:
+                accept = True
+            else:
+                if random.random() < math.exp(-delta_cost / T):
                     accept = True
                 else:
-                    if random.random() < math.exp(-delta_cost / T):
-                        accept = True
-                    else:
-                        accept = False
-                # 根据接受结果做更新
-                sub_cost_all_history.append(cost_new)
-                if accept:
-                    sub_cost_accept_history.append(cost_new)
-                    cur_state = state_new
-                    cur_cost = cost_new
+                    accept = False
+            # 根据接受结果做更新
+            sub_cost_all_history.append(cost_new)
+            if accept:
+                sub_cost_accept_history.append(cost_new)
+                cur_state = state_new
+                cur_cost = cost_new
 
-        cost_history_windowed = sub_cost_accept_history[-smooth_window_length:]
-        return cur_state, cost_history_windowed, sub_cost_accept_history, sub_cost_all_history
+    cost_history_windowed = sub_cost_accept_history[-smooth_window_length:]
+
+    #更新温度等配置参数
+    sigma = np.std(cost_history_windowed)
+    c_smooth = np.mean(cost_history_windowed)
+    T_new = T / (1 + math.log(1 + delta) * T / 3 / (sigma + 0.01))
+
+    if c_smooth_prev is None:
+        c_smooth_prev = c_smooth
+        finish_flag = False
+    else:
+        delta_stop = (c_smooth - c_smooth_prev) / c_smooth
+        c_smooth_prev = c_smooth
+        if np.abs(delta_stop) < epsilon and sigma / c_smooth < 0.01:
+            print("=====stop criterion satisfied=====")
+            print("delta is %.2f" % delta_stop)
+            print("c_smooth is %.2f" % c_smooth)
+            print("sigma is %.2f" % sigma)
+            print("T is %.2f" % T)
+            print("=====************************=====")
+            finish_flag = True
+        else:
+            finish_flag = False
+
+    # 更新状态
+    cur_state.T = T_new
+    cur_state.c_smooth_prev = c_smooth_prev
+    cur_state.prev_state_route = prev_state_route
+    # return cur_state
+    return cur_state.route, cur_state.T, cur_state.c_smooth_prev, \
+           cur_state.prev_state_route, pos_in_pool, \
+           finish_flag, cost_history_windowed[-1]
+
+   #===================================================================================
 
 
+def dispy_one_episode1(state):
+    # 包含 计算状态和温度更新 两部分
 
-    def dispy_update_config(self, cost_history_windowed):
+    # 计算状态
+    global sub_mkv_chain_length, smooth_window_length, delta, epsilon
+    global route_map, num_loc
+    cur_state = state
+    cur_cost = state.cal_cost(route_map)
+    sub_cost_accept_history = [cur_cost, ]
+    sub_cost_all_history = [cur_cost, ]
+
+    while len(sub_cost_accept_history) < smooth_window_length:
+        sub_cost_accept_history.append(sub_cost_accept_history[-1])
+        sub_cost_all_history.append(sub_cost_accept_history[-1])
+        for j in xrange(sub_mkv_chain_length):
+            state_new = cur_state.change_state()
+            cost_new = state_new.cal_cost(route_map)
+            delta_cost = cost_new - cur_cost
+            # 判断新的状态是否接受
+            if delta_cost <= 0:
+                accept = True
+            else:
+                if random.random() < math.exp(-delta_cost / T):
+                    accept = True
+                else:
+                    accept = False
+            # 根据接受结果做更新
+            sub_cost_all_history.append(cost_new)
+            if accept:
+                sub_cost_accept_history.append(cost_new)
+                cur_state = state_new
+                cur_cost = cost_new
+
+    cost_history_windowed = sub_cost_accept_history[-smooth_window_length:]
+    return cur_state, cost_history_windowed, sub_cost_accept_history, sub_cost_all_history
+
+    # 温度更新
 
 
-    def dispy_setup(self):
-        global sub_mkv_chain_length, smooth_window_length, delta, epsilon
-        global route_map, num_loc
-        sub_mkv_chain_length = 1000
-        smooth_window_length = 20
-        delta = 0.01
-        epsilon = 0.01
+def dispy_setup(n_l, r_m):
+    import random, copy
+    global initial_sequence_length, initial_sequence_num, accept_rate_initial
+    global sub_mkv_chain_length, smooth_window_length, delta, epsilon
+    global num_loc, route_map
+    num_loc = n_l
+    route_map = r_m
+    initial_sequence_length = 1000
+    initial_sequence_num = 200
+    accept_rate_initial = 0.98
+    sub_mkv_chain_length = 1000
+    smooth_window_length = 20
+    delta = 0.01
+    epsilon = 0.01
+    return 0
 
 
-    def dispy_cleanup(self):
-        global sub_mkv_chain_length, smooth_window_length, delta, epsilon
-        global route_map, num_loc
-        del sub_mkv_chain_length, smooth_window_length, delta, epsilon
-        del route_map, num_loc
+def dispy_cleanup():
+    global initial_sequence_length, initial_sequence_num, accept_rate_initial
+    global sub_mkv_chain_length, smooth_window_length, delta, epsilon
+    global num_loc, route_map
+    del initial_sequence_length, initial_sequence_num, accept_rate_initial
+    del sub_mkv_chain_length, smooth_window_length, delta, epsilon
+    del num_loc, route_map
 
 
-    def dispy_callback(self):
+def dispy_callback(job):
+    '''
+    def __init__(self, route):
+        self.route = route
+        self.T = None
+        self.c_smooth_prev = None
+        self.prev_state_route = None
+        self.pos_in_pool = None
+
+    in main.py
+        state.pos_in_pool = i
+        state.prev_state_route = route
+    '''
+    # print job.stdout
+    global state_pool, state_pool_lock, pending_jobs, jobs_cond, cost_accept_history
+    if job.status == dispy.DispyJob.Finished  \
+        or job.status in (dispy.DispyJob.Terminated,
+                          dispy.DispyJob.Cancelled,
+                          dispy.DispyJob.Abandoned):
+        jobs_cond.acquire()
+        if job.id:
+            pending_jobs.pop(job.id)
+            if len(pending_jobs) <= lower_bound:
+                jobs_cond.notify()
+        jobs_cond.release()
+
+    if job.status == dispy.DispyJob.Finished:
+        # 得到一段马氏链的结果，包含更新后的温度及c_smooth_prev，以及该子链是否收敛的结果
+        _cur_route, _cur_T, _cur_c_smooth_prev, _prev_route, \
+        _pos_in_pool, _finish_flags, _cost = job()
+
+        _cur_state = AnnealingState(_cur_route)
+        _cur_state.T = _cur_T
+        _cur_state.c_smooth_prev = _cur_c_smooth_prev
+        _cur_state.prev_state_route = _prev_route
+
+        state_pool_lock.acquire()
+        cost_accept_history.append(_cost)
+        #if state_pool.pool[_pos_in_pool].route == _prev_route:
+        if state_pool.pool_value[_pos_in_pool] == cal_route_cost(route_map,_prev_route):
+            state_pool.compare_and_replace1(_cur_state, _pos_in_pool)
+            state_pool.compare_and_replace(_cur_state)
+        else:
+            # state_pool.compare_and_replace1(_cur_state, _pos_in_pool)
+            state_pool.compare_and_replace(_cur_state)
+        state_pool_lock.release()
 
 
+        # 保存信息
+        # print "cost is %f" % _cost
+        print "temperature is %f" % _cur_T
+
+        # 根据返回结果继续提交任务
+        #if finish_flags:
+           # stop_flag = True
 
 
+# deprecated
+def dispy_status_callback(status, node, job):
+    if status == dispy.DispyJob.Finished:
+        print job.stdout
 
+        # 得到一段马氏链的结果，包含更新后的温度及c_smooth_prev，以及该子链是否收敛的结果
+        state, finish_flags, cost = job()
+
+        # 更新状态池
+        state_pool.pool[0] = state
+
+        # 保存信息
+        cost_accept_history.append(cost)
+        #print "cost is %f" % cost
+        #print finish_flags
+        #print job_num_remained
+
+        # 根据返回结果继续提交任务
+        if not finish_flags:
+            state = state_pool.pool[1]
+            print state.T
+            print state.c_smooth_prev
+            job = cluster.submit_node(node, state, dispy_job_depends=[state])
 
 
 if __name__ == "__main__":
-    # m1 = construct_map("map.csv", NUM_LOC)  #
+    # m1 = construct_map("map.csv", NUM_LOC)
     global route_map, num_loc
     num_one_edge = 2
     num_loc = num_one_edge * 4
@@ -463,26 +687,76 @@ if __name__ == "__main__":
         cost = aa.run_parallel()
         print cost
     elif is_parallel_dispy:
-
         state_pool = AnnealingStatePool(2)
         state_pool.initialization()
+        cost_accept_history = []
 
-        cluster = dispy.qq(dispy_run_one_episode,
-                                   setup=dispy_setup,
-                                   depends=[route_map, num_loc]
+        cluster = dispy.JobCluster(dispy_one_episode,
+                                   depends=[AnnealingState, change_route,
+                                            route_swap2,
+                                            cal_route_cost,
+                                            dis_two_loc],
+                                   setup=functools.partial(dispy_setup, num_loc, route_map),
                                    cleanup=dispy_cleanup,
-                                   cluster_status=dispy_callback)
+                                   # cluster_status=dispy_status_callback)
+                                   callback=dispy_callback)
 
-        for i in xrange(state_pool.pool_size):
-            job = cluster.submit(state_initial)
-            job.id = i
-            job.append(job)
+        state_pool_lock = threading.Lock()       # 更新状态池时采用
+        jobs_cond = threading.Condition()
 
-        for job in jobs:
-            answer = job()
-            print('%s executed job %s at %s with %s' % (host, job.id, job.start_time, n))
+        # 分发第一轮
+        state_size = state_pool.pool_size
+        jobs = []
+        for i in xrange(state_size):
+            print i
+            state_pool_lock.acquire()
+            state = copy.deepcopy(state_pool.pool[i])
+            route = copy.copy(state_pool.pool[i].route)
+            state_pool_lock.release()
+            state.pos_in_pool = i
+            state.prev_state_route = route
+            job = cluster.submit(state)
+            jobs.append(job)
+            job()
 
-        cluster.print_status()
+        stop_flag = False
+        lower_bound = 2
+        upper_bound = 10
+        job_num_remained = 15000
+        pending_jobs = {}
+
+        # 分发其余
+        job_id = -1
+        while (not stop_flag) and (job_num_remained > 0):
+            #print job_num_remained
+            job_id += 1
+            job_num_remained -= 1
+            # 随机选取状态
+            index = random.randint(0, state_size-1)
+            state_pool_lock.acquire()
+            state = copy.deepcopy(state_pool.pool[index])
+            route = copy.copy(state_pool.pool[i].route)
+            state_pool_lock.release()
+            state.pos_in_pool = index
+            state.prev_state_route = route
+            job = cluster.submit(state)
+            jobs_cond.acquire()
+            job.id = job_id
+            if job.status == dispy.DispyJob.Created or job.status == dispy.DispyJob.Running:
+                pending_jobs[job_id] = job
+                if len(pending_jobs) >= upper_bound:
+                    while len(pending_jobs) > lower_bound:
+                        jobs_cond.wait()
+            jobs_cond.release()
+
+        if True:
+            cluster.wait()
+            cluster.print_status()
+            cluster.close()
+
+        plot_list(cost_accept_history)
+        print state_pool.pool_value
+            # 分析state_pool中结果
 
 print "FINISHED"
 
